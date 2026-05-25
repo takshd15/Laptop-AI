@@ -46,13 +46,15 @@ var askCmd = &cobra.Command{
 
 		model := llm.NewOllama()
 		fmt.Println("Answer:")
+		var answer strings.Builder
 		if err := model.Stream(context.Background(), question, chunks, func(token string) {
 			fmt.Print(token)
+			answer.WriteString(token)
 		}); err != nil {
 			return err
 		}
 		fmt.Print("\n")
-		fmt.Print(llm.FormatSources(chunks))
+		fmt.Print(llm.FormatCitedSources(answer.String(), chunks))
 		return nil
 	},
 }

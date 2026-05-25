@@ -2,6 +2,8 @@ package llm
 
 import (
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -58,6 +60,39 @@ func FormatSources(chunks []Chunk) string {
 	if len(chunks) == 0 {
 		return ""
 	}
+	return formatSourceList(chunks)
+}
+
+// FormatCitedSources returns only sources cited in answer as [1], [2], etc.
+// If the answer has no citation markers, it falls back to every retrieved source.
+func FormatCitedSources(answer string, chunks []Chunk) string {
+	if len(chunks) == 0 {
+		return ""
+	}
+
+	citationRE := regexp.MustCompile(`\[(\d+)\]`)
+	matches := citationRE.FindAllStringSubmatch(answer, -1)
+	if len(matches) == 0 {
+		return formatSourceList(chunks)
+	}
+
+	selected := make([]Chunk, 0, len(matches))
+	seenIndexes := make(map[int]bool, len(matches))
+	for _, match := range matches {
+		n, err := strconv.Atoi(match[1])
+		if err != nil || n < 1 || n > len(chunks) || seenIndexes[n] {
+			continue
+		}
+		seenIndexes[n] = true
+		selected = append(selected, chunks[n-1])
+	}
+	if len(selected) == 0 {
+		return formatSourceList(chunks)
+	}
+	return formatSourceList(selected)
+}
+
+func formatSourceList(chunks []Chunk) string {
 	var sb strings.Builder
 	sb.WriteString("\nSources:\n")
 	seen := make(map[string]bool, len(chunks))

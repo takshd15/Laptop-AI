@@ -38,7 +38,7 @@ func TestBuildPrompt_InjectionLabeling(t *testing.T) {
 	}
 
 	// The injection text must appear inside the untrusted region, not before it.
-	contextSection := prompt[beginIdx:strings.Index(prompt, endBoundary)+len(endBoundary)]
+	contextSection := prompt[beginIdx : strings.Index(prompt, endBoundary)+len(endBoundary)]
 	if !strings.Contains(contextSection, injection) {
 		t.Error("injection text should appear as data inside the untrusted context section")
 	}
@@ -104,5 +104,30 @@ func TestFormatSources_ListsSources(t *testing.T) {
 func TestFormatSources_Empty(t *testing.T) {
 	if got := FormatSources(nil); got != "" {
 		t.Errorf("FormatSources(nil) = %q, want empty", got)
+	}
+}
+
+func TestFormatCitedSources_OnlyCited(t *testing.T) {
+	chunks := []Chunk{
+		{Text: "a", FilePath: "/docs/biology.md"},
+		{Text: "b", FilePath: "/docs/startup.md"},
+	}
+	out := FormatCitedSources("The answer is in the biology notes. [1]", chunks)
+	if !strings.Contains(out, "biology.md") {
+		t.Error("FormatCitedSources should include cited source")
+	}
+	if strings.Contains(out, "startup.md") {
+		t.Error("FormatCitedSources should not include uncited source")
+	}
+}
+
+func TestFormatCitedSources_NoCitationsFallsBack(t *testing.T) {
+	chunks := []Chunk{
+		{Text: "a", FilePath: "/docs/biology.md"},
+		{Text: "b", FilePath: "/docs/startup.md"},
+	}
+	out := FormatCitedSources("The answer has no citation markers.", chunks)
+	if !strings.Contains(out, "biology.md") || !strings.Contains(out, "startup.md") {
+		t.Error("FormatCitedSources should fall back to all sources when answer has no citations")
 	}
 }
