@@ -9,6 +9,14 @@ source-cited answers.
 
 ![Laptop AI demo](docs/demo.gif)
 
+## Demo Assets
+
+For a short project post:
+
+- Main visual: [terminal GIF](docs/demo.gif)
+- Backup visual: [architecture diagram](docs/architecture.png)
+- Backup visual: [benchmarks and security proof](docs/proof.png)
+
 ## Setup
 
 Requirements:
@@ -159,4 +167,4 @@ Numbers vary by disk, CPU, and corpus shape.
 - Stale chunk deletion and compaction.
 - Optional Ollama integration tests.
 - `search`, `sources`, `forget`, and `doctor` commands.
-- Recorded terminal demo from a clean clone.
+- Real captured terminal recording from a clean clone.
