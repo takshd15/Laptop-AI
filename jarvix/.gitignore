@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+
+.env
+secrets/
+token*.json
+google_token.json
+google_credentials.json
