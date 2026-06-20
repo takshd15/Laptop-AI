@@ -167,7 +167,7 @@ func (db *DB) Get(id uint64) (Record, bool) {
 		return db.corpus[pos], true
 	}
 
-	// Disk fallback via per-segment index (O(segments) seek operations).
+	// Disk fallback: binary-search the block index, then scan at most blockSize records.
 	segDir := filepath.Join(db.dir, dirSegments)
 	entries, _ := os.ReadDir(segDir)
 	for i := len(entries) - 1; i >= 0; i-- {
@@ -179,11 +179,11 @@ func (db *DB) Get(id uint64) (Record, bool) {
 		if !ok {
 			continue
 		}
-		offset := idx.Lookup(id)
+		offset, count := idx.LookupBlock(id)
 		if offset < 0 {
 			continue
 		}
-		rec, err := db.readFromSegment(filepath.Join(segDir, e.Name()), offset)
+		rec, err := db.readFromSegmentByID(filepath.Join(segDir, e.Name()), id, offset, count)
 		if err == nil {
 			return rec, true
 		}
@@ -291,7 +291,10 @@ func (db *DB) nextSegmentPath() string {
 	return filepath.Join(db.dir, dirSegments, fmt.Sprintf("segment_%06d.db", n+1))
 }
 
-func (db *DB) readFromSegment(path string, offset int64) (Record, error) {
+// readFromSegmentByID seeks to a block's start offset and scans up to count records
+// (≤ blockSize) to find the one with the target id. Records within a block are sorted
+// by ID, so scanning stops early if the current record's ID exceeds the target.
+func (db *DB) readFromSegmentByID(path string, id uint64, offset int64, count uint32) (Record, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return Record{}, err
@@ -299,7 +302,21 @@ func (db *DB) readFromSegment(path string, offset int64) (Record, error) {
 	defer f.Close()
 
 	if _, err := f.Seek(offset, io.SeekStart); err != nil {
-		return Record{}, fmt.Errorf("seek to offset %d: %w", offset, err)
+		return Record{}, fmt.Errorf("seek to block offset %d: %w", offset, err)
 	}
-	return DecodeRecord(bufio.NewReader(f))
+
+	r := bufio.NewReader(f)
+	for i := uint32(0); i < count; i++ {
+		rec, err := DecodeRecord(r)
+		if err != nil {
+			return Record{}, fmt.Errorf("decode in block scan: %w", err)
+		}
+		if rec.ID == id {
+			return rec, nil
+		}
+		if rec.ID > id {
+			break // sorted order — target cannot appear later
+		}
+	}
+	return Record{}, fmt.Errorf("record %d not found in block at offset %d", id, offset)
 }
