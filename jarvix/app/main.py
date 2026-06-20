@@ -1,5 +1,11 @@
+import html
+import re
+import threading
+
 import typer
 from rich.console import Console
+from datetime import datetime
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.brain.ollama_client import ask_ollama, warmup as _warmup
 from app.tools.gmail import get_recent_emails
@@ -14,16 +20,25 @@ from app.tools.prefilter import prefilter, is_worthy
 from app.safety.permissions import needs_confirmation, confirm
 from app.models import EventCandidate
 from app.voice.tts import speak
-from app.tools.desktop import open_app as desktop_open_app, open_folder as desktop_open_folder, DesktopError
+from app.tools.desktop import (
+    open_app as desktop_open_app,
+    open_folder as desktop_open_folder,
+    open_workspace as desktop_open_workspace,
+    DesktopError,
+)
 from app.tools import music as music_tool
 from app.tools import email_actions
 from app.brain import intent_router
+from app.brain.voice_assistant import answer_spoken
 from app.config import (
     USER_DISPLAY_NAME,
     JARVIX_GREETING,
     AUTO_OPEN_APP_ON_WAKE,
     AUTO_OPEN_FOLDER_ON_WAKE,
     AUTO_START_MUSIC_ON_WAKE,
+    AUTO_MUSIC_QUERY_ON_WAKE,
+    AUTO_MUSIC_URI_ON_WAKE,
+    TIMEZONE,
 )
 
 app = typer.Typer(help="Jarvix v0 - local AI assistant for Gmail + Calendar.")
@@ -98,15 +113,23 @@ def run_intent(intent: intent_router.Intent) -> str:
         return _brief_text()
     if intent.name == intent_router.TODAY:
         return _today_text()
+    if intent.name == intent_router.READ_EMAILS:
+        return _read_emails_text(intent.raw)
     if intent.name == intent_router.SCAN_MAIL:
         # Reads aloud + asks for typed confirmation; never auto-writes the calendar.
-        _run_scan(limit=12, days=10, use_prefilter=True, speak_summary=True)
+        _run_scan(limit=4, days=3, use_prefilter=True, speak_summary=True)
         return ""  # all speaking already happened inside the scan
     if intent.name == intent_router.DRAFT_EMAIL:
         return _voice_email(intent.recipient, intent.message, send=False)
     if intent.name == intent_router.SEND_EMAIL:
         return _voice_email(intent.recipient, intent.message, send=True)
-    return "Sorry, I did not understand that command."
+    if intent.name == intent_router.QUESTION:
+        return answer_spoken(intent.raw)
+    if intent.name == intent_router.CONVERSATION:
+        return answer_spoken(intent.raw)
+    if intent.name == intent_router.CLARIFICATION_NEEDED:
+        return "I didn't catch that clearly. Can you repeat it?"
+    return "I didn't catch that clearly. Can you repeat it?"
 
 
 def _voice_email(recipient_name: str | None, message: str | None, send: bool) -> str:
@@ -167,48 +190,250 @@ def _humanize_actions(actions: list[str]) -> str:
     return joined[0].upper() + joined[1:]
 
 
+def _parse_calendar_start(value: str | None) -> datetime | None:
+    if not value or "T" not in value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    try:
+        return parsed.astimezone(ZoneInfo(TIMEZONE))
+    except ZoneInfoNotFoundError:
+        return parsed.astimezone()
+
+
+def _local_now() -> datetime:
+    try:
+        return datetime.now(ZoneInfo(TIMEZONE))
+    except ZoneInfoNotFoundError:
+        return datetime.now().astimezone()
+
+
+def _event_local_date(event: dict):
+    start = event.get("start") or ""
+    if "T" in start:
+        local = _parse_calendar_start(start)
+        return local.date() if local else None
+    try:
+        return datetime.fromisoformat(start).date()
+    except ValueError:
+        return None
+
+
+def _spoken_event_time(event: dict) -> str:
+    start = event.get("start") or ""
+    local = _parse_calendar_start(start)
+    if not local:
+        return "all day"
+    return local.strftime("%I:%M %p").lstrip("0")
+
+
+def _todays_events(limit: int = 12) -> list[dict]:
+    today = _local_now().date()
+    events = get_upcoming_events(days=2, limit=limit)
+    return [event for event in events if _event_local_date(event) == today]
+
+
+def _calendar_brief_text(include_startup_actions: bool = False) -> str:
+    """Fast deterministic calendar-only briefing for wake mode."""
+    details = _calendar_tasks_text(include_startup_actions=include_startup_actions)
+    return f"{JARVIX_GREETING}, {USER_DISPLAY_NAME}. {details}"
+
+
+def _calendar_tasks_text(include_startup_actions: bool = False) -> str:
+    """Fast deterministic calendar-only task summary without the greeting."""
+    console.print("[bold cyan]Reading calendar...[/bold cyan]")
+    events = get_upcoming_events(days=1, limit=8)
+
+    if events:
+        items = []
+        for event in events[:4]:
+            summary = event.get("summary", "Untitled")
+            items.append(f"{_spoken_event_time(event)} {summary}")
+        if len(items) == 1:
+            task_text = items[0]
+        elif len(items) == 2:
+            task_text = f"{items[0]} and {items[1]}"
+        else:
+            task_text = ", ".join(items[:-1]) + f", and {items[-1]}"
+        text = f"Your tasks for the day are {task_text}."
+    else:
+        text = "Your calendar is clear for the rest of today."
+
+    if include_startup_actions:
+        track = AUTO_MUSIC_QUERY_ON_WAKE.strip() or AUTO_MUSIC_URI_ON_WAKE.strip()
+        music_text = f' and play "{track}"' if track else " and start Spotify"
+        text += f" I'll open VS Code{music_text} for you."
+
+    return text
+
+
+_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def _email_limit_from_text(text: str | None, default: int = 5, max_limit: int = 10) -> int:
+    if not text:
+        return default
+
+    lowered = text.lower()
+    token = r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten)"
+    patterns = [
+        rf"\b(?:last|latest|recent|newest|first)\s+{token}\b",
+        rf"\b{token}\s+(?:email|emails|mail|messages)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, lowered)
+        if not match:
+            continue
+        value = match.group(1)
+        count = int(value) if value.isdigit() else _NUMBER_WORDS.get(value, default)
+        return max(1, min(count, max_limit))
+
+    return default
+
+
+def _clean_email_text(value: str | None, max_chars: int = 260) -> str:
+    text = html.unescape(value or "")
+    text = (
+        text.replace("’", "'")
+        .replace("‘", "'")
+        .replace("“", '"')
+        .replace("”", '"')
+        .replace("—", "-")
+        .replace("–", "-")
+    )
+    text = text.encode("ascii", errors="ignore").decode("ascii")
+    text = re.sub(r"[\u200b-\u200f\u202a-\u202e]", "", text)
+    text = re.sub(r"https?://\S+", "", text)
+    text = re.sub(r"<[^>]+>", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" -:\t\r\n")
+    for marker in (
+        " MEGATHON ",
+        " View Event ",
+        " Download the ",
+        " Reply above this line ",
+        " Click the link below ",
+    ):
+        if marker.lower() in text.lower():
+            text = re.split(re.escape(marker), text, maxsplit=1, flags=re.I)[0].strip(" -:\t\r\n")
+    if len(text) <= max_chars:
+        return text
+
+    shortened = text[:max_chars].rsplit(" ", 1)[0].strip(" ,.;:")
+    return f"{shortened}..."
+
+
+def _sender_name(value: str | None) -> str:
+    sender = html.unescape(value or "").strip()
+    if "<" in sender:
+        sender = sender.split("<", 1)[0].strip().strip('"')
+    return sender or "unknown sender"
+
+
+def _email_summary(email: dict) -> str:
+    subject = _clean_email_text(email.get("subject") or "(no subject)", max_chars=55)
+    body = _clean_email_text(email.get("snippet") or email.get("body") or "", max_chars=85)
+
+    if body.lower().startswith(subject.lower()):
+        body = body[len(subject):].strip(" .:-")
+    if not body:
+        body = "No preview text."
+
+    sender = _sender_name(email.get("from"))
+    return f"{sender}: {subject}. {body}"
+
+
+def _read_emails_text(command_text: str | None = None, days: int = 1) -> str:
+    """Read a short Gmail summary only after the user asks for it."""
+    limit = min(_email_limit_from_text(command_text), 5)
+    console.print("[bold cyan]Reading today's Gmail...[/bold cyan]")
+    emails = get_recent_emails(limit=limit, days=days)
+    if not emails:
+        return "I don't see any recent Gmail from today."
+
+    return "\n".join(
+        f"{index}. {_email_summary(email)}"
+        for index, email in enumerate(emails[:limit], start=1)
+    )
+
+
+def _open_welcome_workspace() -> None:
+    if AUTO_OPEN_APP_ON_WAKE and AUTO_OPEN_FOLDER_ON_WAKE:
+        try:
+            msg = desktop_open_workspace(AUTO_OPEN_APP_ON_WAKE, AUTO_OPEN_FOLDER_ON_WAKE)
+            console.print(f"[dim]{msg}[/dim]")
+        except DesktopError as exc:
+            console.print(f"[yellow]Welcome: {exc}[/yellow]")
+    elif AUTO_OPEN_APP_ON_WAKE:
+        try:
+            msg = desktop_open_app(AUTO_OPEN_APP_ON_WAKE)
+            console.print(f"[dim]{msg}[/dim]")
+        except DesktopError as exc:
+            console.print(f"[yellow]Welcome: {exc}[/yellow]")
+
+
+def _start_welcome_music() -> None:
+    if not AUTO_START_MUSIC_ON_WAKE:
+        return
+    try:
+        track = AUTO_MUSIC_URI_ON_WAKE.strip() or AUTO_MUSIC_QUERY_ON_WAKE.strip()
+        if track:
+            msg = music_tool.play(track)
+        else:
+            music_tool.open_spotify()
+            msg = music_tool.play_pause()
+        console.print(f"[dim]{msg}[/dim]")
+    except Exception as exc:  # media key should never crash the routine
+        console.print(f"[yellow]Welcome: music failed: {exc}[/yellow]")
+
+
 def run_welcome() -> str:
     """The Jarvis-style wake routine: brief + safe auto-actions.
 
-    Only SAFE actions auto-run (briefing, open app, open folder, music). No
-    Gmail or calendar writes ever happen here. Returns the full text to speak;
-    the briefing already opens with the greeting.
+    Only SAFE actions auto-run (calendar read, open VS Code workspace, Spotify).
+    No Gmail or calendar writes ever happen here.
     """
-    briefing = _brief_text()
-    actions: list[str] = []
+    _open_welcome_workspace()
+    return _calendar_brief_text(include_startup_actions=True)
 
-    if AUTO_OPEN_APP_ON_WAKE:
-        try:
-            desktop_open_app(AUTO_OPEN_APP_ON_WAKE)
-            actions.append(f"opening {AUTO_OPEN_APP_ON_WAKE}")
-        except DesktopError as exc:
-            console.print(f"[yellow]Welcome: {exc}[/yellow]")
 
-    if AUTO_OPEN_FOLDER_ON_WAKE:
-        try:
-            desktop_open_folder(AUTO_OPEN_FOLDER_ON_WAKE)
-        except DesktopError as exc:
-            console.print(f"[yellow]Welcome: {exc}[/yellow]")
+def _speak_welcome() -> str:
+    """Speak greeting first, then start Spotify while reading the calendar."""
+    _open_welcome_workspace()
+    greeting = f"{JARVIX_GREETING}, {USER_DISPLAY_NAME}."
+    console.print(f"\n[bold green]Jarvix:[/bold green]\n{greeting}")
+    speak(greeting)
 
-    if AUTO_START_MUSIC_ON_WAKE:
-        try:
-            music_tool.play_pause()
-            actions.append("starting music")
-        except Exception as exc:  # media key should never crash the routine
-            console.print(f"[yellow]Welcome: music failed: {exc}[/yellow]")
+    music_thread = threading.Thread(target=_start_welcome_music, name="jarvix-welcome-music")
+    music_thread.start()
 
-    if actions:
-        return f"{briefing} {_humanize_actions(actions)}."
-    return briefing
+    details = _calendar_tasks_text(include_startup_actions=True)
+    console.print(details)
+    speak(details)
+    return f"{greeting} {details}"
 
 
 @app.command()
 def welcome(silent: bool = typer.Option(False, "--silent", help="Print only, do not speak.")):
     """Run the welcome routine once: briefing + safe auto-actions."""
-    text = run_welcome()
-    console.print(f"\n[bold green]Jarvix:[/bold green]\n{text}")
-    if not silent:
-        speak(text)
+    if silent:
+        text = run_welcome()
+        _start_welcome_music()
+        console.print(f"\n[bold green]Jarvix:[/bold green]\n{text}")
+        return
+    _speak_welcome()
 
 
 @app.command()
@@ -241,6 +466,19 @@ def reauth():
     console.print("[bold cyan]Opening browser for Google consent (incl. Gmail send)...[/bold cyan]")
     get_google_credentials()
     console.print("[green]Re-authenticated. New scopes are active.[/green]")
+
+
+@app.command()
+def spotify_auth():
+    """Authorize Spotify Web API playback and save a refresh token."""
+    music_tool.get_spotify_access_token()
+    console.print("[green]Spotify is authorized for playback.[/green]")
+
+
+@app.command()
+def say(text: str = typer.Argument("Jarvix voice test.")):
+    """Speak text aloud to test local TTS."""
+    speak(text)
 
 
 @app.command()
@@ -410,33 +648,128 @@ def open_folder(name: str = typer.Argument(..., help="Folder alias, e.g. jarvix 
 @app.command()
 def wake(
     with_welcome: bool = typer.Option(
-        True, "--welcome/--no-welcome", help="Run the welcome routine on the first clap."
+        True, "--welcome/--no-welcome", help="Run the welcome routine on the first trigger."
+    ),
+    mode: str = typer.Option(
+        None, "--mode", help="Override WAKE_MODE: 'wakeword', 'clap', or 'enter'."
     ),
 ):
-    """Stay awake: first clap runs the welcome routine, then double-clap to talk. Ctrl+C to stop."""
+    """Stay awake: first trigger runs the welcome routine, then trigger to talk. Ctrl+C to stop."""
+    from app.config import WAKE_MODE, WAKE_WORD
     from app.voice.wake_loop import wake_loop
-    from app.voice.clap_detector import wait_for_double_clap
     from app.voice.recorder import MicUnavailable
+
+    wake_mode = (mode or WAKE_MODE).strip().lower()
+
+    if wake_mode == "enter":
+        def wait_for_wake() -> str | None:
+            input("  [press Enter to talk] ")
+            return None
+        trigger_hint = "Press Enter to talk."
+    elif wake_mode == "clap":
+        from app.voice.clap_detector import wait_for_double_clap
+        def wait_for_wake() -> str | None:
+            wait_for_double_clap(verbose=True)
+            return None
+        trigger_hint = "Double-clap to talk."
+    else:  # wakeword (default)
+        from app.voice.wakeword import wait_for_wake_word
+        def wait_for_wake() -> str | None:
+            return wait_for_wake_word(verbose=True)
+        trigger_hint = f'Say "hey {WAKE_WORD}" to talk.'
 
     def handle(text: str) -> str:
         intent = intent_router.parse(text)
         console.print(f"[dim]intent={intent.name} arg={intent.arg}[/dim]")
         return run_intent(intent)
 
-    console.print("[bold cyan]Jarvix is awake. Ctrl+C to stop.[/bold cyan]")
+    console.print(f"[bold cyan]Jarvix is awake ({wake_mode} mode). {trigger_hint} Ctrl+C to stop.[/bold cyan]")
     try:
         if with_welcome:
-            console.print("[cyan]Double-clap to start your day...[/cyan]")
-            wait_for_double_clap()
-            text = run_welcome()
-            console.print(f"\n[bold green]Jarvix:[/bold green]\n{text}")
-            speak(text)
-        wake_loop(handle, speak)
+            console.print(f"[cyan]{trigger_hint} to start your day...[/cyan]")
+            wait_for_wake()
+            _speak_welcome()
+        wake_loop(handle, speak, wait_for_wake=wait_for_wake, announce="")
     except MicUnavailable as exc:
         console.print(f"[red]Microphone unavailable: {exc}. Jarvix can't run the wake loop.[/red]")
         raise typer.Exit(code=1)
     except KeyboardInterrupt:
         console.print("\n[yellow]Jarvix going to sleep.[/yellow]")
+
+
+@app.command()
+def clap_calibrate(seconds: int = typer.Option(15, help="How long to listen.")):
+    """Live mic monitor for tuning clap detection.
+
+    Clap a few times AND say a word or two. Claps should show as 'CLAP'; speech
+    should be 'rejected'. Use the reported clap peak/brightness to tune.
+    """
+    import time
+    import numpy as np
+    import sounddevice as sd
+    from app.config import CLAP_THRESHOLD
+    from app.voice.clap_detector import _ClapTracker, _dynamic_threshold, brightness
+    from app.voice.recorder import MicUnavailable
+
+    sr, blk = 16000, int(16000 * 0.02)
+    console.print(
+        f"[bold cyan]Listening {seconds}s (adaptive, floor={CLAP_THRESHOLD}).\n"
+        f"Clap a few times, then say 'hello' a few times...[/bold cyan]"
+    )
+
+    tracker = _ClapTracker()
+    ambient = 0.005
+    clap_peaks: list[float] = []
+    last_clap_t = None
+    doubles = 0
+    start = time.time()
+    try:
+        with sd.InputStream(samplerate=sr, channels=1, dtype="float32", blocksize=blk) as s:
+            while time.time() - start < seconds:
+                d, _ = s.read(blk)
+                samples = d[:, 0]
+                rms = float(np.sqrt(np.mean(samples**2)))
+                peak = float(np.max(np.abs(samples)))
+                res = tracker.push(peak, _dynamic_threshold(ambient))
+                if not tracker.in_event:
+                    ambient = 0.95 * ambient + 0.05 * rms
+                if not res:
+                    continue
+                br = brightness(samples)
+                if res["is_clap"]:
+                    clap_peaks.append(res["peak"])
+                    now = time.time()
+                    dbl = last_clap_t is not None and 0.12 <= (now - last_clap_t) <= 0.8
+                    if dbl:
+                        doubles += 1
+                    tag = " [green]<- DOUBLE![/green]" if dbl else ""
+                    console.print(
+                        f"  [green]CLAP[/green]  peak {res['peak']:.3f}  "
+                        f"bright {br:.2f}  {res['duration_ms']:.0f}ms{tag}"
+                    )
+                    last_clap_t = now
+                else:
+                    console.print(
+                        f"  [dim]rejected  peak {res['peak']:.3f}  "
+                        f"bright {br:.2f}  {res['duration_ms']:.0f}ms ({res['reason']})[/dim]"
+                    )
+    except Exception as exc:
+        raise MicUnavailable(str(exc)) from exc
+
+    console.print(f"\n[bold]Claps detected:[/bold] {len(clap_peaks)}   "
+                  f"[bold]Double-claps:[/bold] {doubles}")
+    if clap_peaks:
+        suggested = round(min(clap_peaks) * 0.6, 3)
+        console.print(
+            f"[green]Quietest clap {min(clap_peaks):.3f}. "
+            f"If claps were missed, set CLAP_THRESHOLD={suggested} in .env.[/green]"
+        )
+    else:
+        console.print(
+            "[yellow]No claps classified. If sounds showed as 'too long', clap sharper. "
+            "If nothing showed at all, your mic is suppressing transients - disable mic "
+            "enhancements in Windows Sound settings, or use WAKE_MODE=enter.[/yellow]"
+        )
 
 
 @app.command()
@@ -462,6 +795,36 @@ def listen():
         raise typer.Exit(code=1)
 
     console.print(f"\n[bold green]You said:[/bold green] {text}")
+
+
+@app.command()
+def mic_debug(seconds: float = typer.Option(5.0, help="Seconds to record.")):
+    """Record once, show mic levels, and transcribe the result."""
+    import numpy as np
+    from app.voice.recorder import record, MicUnavailable
+    from app.voice.stt import transcribe
+
+    console.print(f"[bold cyan]Recording {seconds:.1f}s. Say: Jarvis read my calendar.[/bold cyan]")
+    try:
+        audio = record(
+            max_seconds=seconds,
+            silence_threshold=0.003,
+            trailing_silence=1.2,
+            start_timeout=seconds,
+        )
+    except MicUnavailable as exc:
+        console.print(f"[red]Microphone unavailable: {exc}[/red]")
+        raise typer.Exit(code=1)
+
+    if audio.size == 0:
+        console.print("[yellow]No audio crossed the speech threshold.[/yellow]")
+        return
+
+    rms = float(np.sqrt(np.mean(audio**2)))
+    peak = float(np.max(np.abs(audio)))
+    console.print(f"[dim]samples={audio.size} rms={rms:.4f} peak={peak:.4f}[/dim]")
+    text = transcribe(audio)
+    console.print(f"[bold green]Transcribed:[/bold green] {text or '(empty)'}")
 
 
 @app.command()
@@ -505,56 +868,8 @@ def play(song: str = typer.Argument(..., help="Song or artist to search and play
 
 
 def _brief_text() -> str:
-    """Build the short spoken daily briefing text (no speaking/printing of result)."""
-    console.print("[bold cyan]Reading calendar...[/bold cyan]")
-    soon = get_upcoming_events(days=2, limit=20)
-    window = get_events_window(days_ahead=14, limit=50)
-
-    console.print("[bold cyan]Reading recent Gmail...[/bold cyan]")
-    emails = get_recent_emails(limit=8, days=10)
-
-    timed = [e for e in soon if "T" in (e.get("start") or "")]
-    deadlines = [e for e in window if "T" not in (e.get("start") or "")]
-    important = [e for e in emails if is_worthy(e)]
-
-    events_text = "\n".join(
-        f"- {e['start']} to {e['end']}: {e['summary']}" for e in timed
-    ) or "(none)"
-    deadlines_text = "\n".join(
-        f"- {e['start']}: {e['summary']}" for e in deadlines
-    ) or "(none)"
-    emails_text = "\n".join(
-        f"- From: {e['from']} | Subject: {e['subject']}" for e in important
-    ) or "(none)"
-
-    system_prompt = f"""
-You are Jarvix, a private local personal assistant giving a SPOKEN briefing.
-
-Rules:
-- This text will be read aloud, so write flowing natural sentences. No bullet
-  points, no markdown, no headings, no emojis.
-- Start with exactly: "{JARVIX_GREETING} {USER_DISPLAY_NAME}."
-- Keep it under 4 sentences total.
-- Do NOT invent dates, meetings, or deadlines. Use only the data provided.
-- Do NOT claim you sent, created, or added anything.
-- If there is nothing scheduled, say the day looks open.
-"""
-
-    user_prompt = f"""
-Today/tomorrow events:
-{events_text}
-
-Upcoming deadlines (next 14 days):
-{deadlines_text}
-
-Important recent emails:
-{emails_text}
-
-Give the spoken briefing now.
-"""
-
-    console.print("[bold cyan]Thinking...[/bold cyan]")
-    return ask_ollama(system_prompt, user_prompt, timeout=300, num_predict=200).strip()
+    """Build the short spoken daily briefing text without reading Gmail."""
+    return _calendar_brief_text()
 
 
 @app.command()
@@ -570,73 +885,32 @@ def brief(
 
 
 def _today_text() -> str:
-    """Build the today/tomorrow plan text via a single model call."""
+    """Build a fast spoken schedule summary without Gmail or the LLM."""
     console.print("[bold cyan]Reading calendar...[/bold cyan]")
-    soon = get_upcoming_events(days=2, limit=20)
-    window = get_events_window(days_ahead=14, limit=50)
+    events = _todays_events(limit=12)
+    if not events:
+        return "Your calendar is clear for the rest of today."
 
-    console.print("[bold cyan]Reading recent Gmail...[/bold cyan]")
-    emails = get_recent_emails(limit=8, days=10)
+    spoken = []
+    for event in events[:6]:
+        summary = event.get("summary") or "Untitled"
+        spoken.append(f"{_spoken_event_time(event)}, {summary}")
 
-    # Timed events (today/tomorrow) are "Calendar"; all-day items are "Deadlines".
-    timed = [e for e in soon if "T" in (e.get("start") or "")]
-    deadlines = [e for e in window if "T" not in (e.get("start") or "")]
+    if len(spoken) == 1:
+        items = spoken[0]
+    elif len(spoken) == 2:
+        items = f"{spoken[0]} and {spoken[1]}"
+    else:
+        items = ", ".join(spoken[:-1]) + f", and {spoken[-1]}"
 
-    events_text = "\n".join(
-        f"- {e['start']} to {e['end']}: {e['summary']} {('@ ' + e['location']) if e.get('location') else ''}"
-        for e in timed
-    ) or "(none)"
-
-    emails_text = "\n".join(
-        f"- From: {e['from']} | Subject: {e['subject']} | {e['snippet']}"
-        for e in emails
-    ) or "(none)"
-
-    deadlines_text = "\n".join(
-        f"- {e['start']}: {e['summary']}" for e in deadlines
-    ) or "(none)"
-
-    system_prompt = """
-You are Jarvix, a private local personal assistant.
-
-Rules:
-- Do NOT invent dates, meetings, or deadlines. Use only the data provided.
-- Do NOT claim you sent, created, or added anything.
-- If information is missing, say so instead of guessing.
-- Maximum 12 bullets total. No long explanations. No motivational essay.
-
-Use exactly these four sections:
-Calendar:
-Deadlines:
-Important emails:
-Suggested plan:
-"""
-
-    user_prompt = f"""
-Confirmed calendar events (today/tomorrow):
-{events_text}
-
-Recent emails:
-{emails_text}
-
-Upcoming all-day deadlines (next 14 days):
-{deadlines_text}
-
-Create a short, realistic plan for today and tomorrow.
-"""
-
-    console.print("[bold cyan]Thinking...[/bold cyan]")
-    return ask_ollama(system_prompt, user_prompt, timeout=300, num_predict=300)
+    extra = len(events) - len(spoken)
+    suffix = f" You also have {extra} more item{'s' if extra != 1 else ''}." if extra > 0 else ""
+    return f"Today you have {len(events)} item{'s' if len(events) != 1 else ''}: {items}.{suffix}"
 
 
 @app.command()
 def today():
-    """Read updated Calendar + recent emails and generate a today/tomorrow plan.
-
-    Deadlines come from the calendar (all-day events written by scan-mail), so
-    this command runs a single model call and stays fast - it does NOT re-extract
-    from every email.
-    """
+    """Read today's Calendar and print a short spoken schedule summary."""
     plan = _today_text()
     console.print("\n[bold green]Jarvix plan:[/bold green]\n")
     console.print(plan)

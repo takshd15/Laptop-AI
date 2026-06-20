@@ -1,6 +1,5 @@
 @echo off
-REM Jarvix v2 - launched on login from the Windows Startup folder.
-REM It starts the wake loop, which stays silent until a double clap.
+REM Jarvix v2 - starts the clap wake loop using the venv Python directly
+REM (no 'activate' needed, so it works regardless of shell state).
 cd /d C:\Users\hp\VectorDB\jarvix
-call .venv\Scripts\activate
-python -m app.runtime.startup
+".venv\Scripts\python.exe" -m app.runtime.startup

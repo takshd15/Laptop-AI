@@ -10,7 +10,7 @@ from __future__ import annotations
 import numpy as np
 import sounddevice as sd
 
-from app.config import VOICE_RECORD_SECONDS
+from app.config import MIC_SILENCE_THRESHOLD, VOICE_RECORD_SECONDS
 
 SAMPLE_RATE = 16000
 _BLOCK_SECONDS = 0.1
@@ -22,7 +22,7 @@ class MicUnavailable(Exception):
 
 def record(
     max_seconds: float | None = None,
-    silence_threshold: float = 0.012,
+    silence_threshold: float | None = None,
     trailing_silence: float = 1.0,
     start_timeout: float = 5.0,
 ) -> np.ndarray:
@@ -34,6 +34,8 @@ def record(
     """
     if max_seconds is None:
         max_seconds = float(VOICE_RECORD_SECONDS)
+    if silence_threshold is None:
+        silence_threshold = MIC_SILENCE_THRESHOLD
 
     block = int(SAMPLE_RATE * _BLOCK_SECONDS)
     max_blocks = int(max_seconds / _BLOCK_SECONDS)

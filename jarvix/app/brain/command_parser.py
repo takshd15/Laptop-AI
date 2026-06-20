@@ -1,9 +1,8 @@
 """Command parsing seam for Jarvix v2.
 
-Today the deterministic rule-based parsing lives in ``intent_router.parse``.
-This module is the stable entry point the rest of the app should import, so a
-future smarter parser (LLM-assisted slot filling, fuzzy aliases, etc.) can be
-swapped in here without touching callers.
+``intent_router.parse`` uses fast rules first, then a local LLM fallback for
+unfamiliar wording. This module is the stable entry point the rest of the app
+can import without caring how parsing is implemented.
 """
 
 from __future__ import annotations

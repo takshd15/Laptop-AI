@@ -87,12 +87,16 @@ def extract_from_email(email: dict, today: str, use_cache: bool = True) -> list[
         if cached is not None:
             return [EventCandidate(**d) for d in cached]
 
-    raw = ask_ollama(
-        EXTRACTION_SYSTEM,
-        _build_user_prompt(email, today),
-        json_mode=True,
-        num_predict=512,
-    )
+    try:
+        raw = ask_ollama(
+            EXTRACTION_SYSTEM,
+            _build_user_prompt(email, today),
+            json_mode=True,
+            timeout=5,
+            num_predict=256,
+        )
+    except Exception:
+        return []
 
     candidates: list[EventCandidate] = []
     for item in _parse_candidates(raw):

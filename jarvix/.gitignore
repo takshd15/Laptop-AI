@@ -15,3 +15,6 @@ google_credentials.json
 
 # Personal contact data (real emails). Ship contacts.example.json instead.
 app/memory/contacts.json
+
+# Background run log
+jarvix.log
