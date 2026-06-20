@@ -12,3 +12,6 @@ secrets/
 token*.json
 google_token.json
 google_credentials.json
+
+# Personal contact data (real emails). Ship contacts.example.json instead.
+app/memory/contacts.json

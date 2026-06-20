@@ -19,3 +19,23 @@ GOOGLE_TOKEN_FILE = ROOT / os.getenv(
 )
 
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Amsterdam")
+
+USER_DISPLAY_NAME = os.getenv("USER_DISPLAY_NAME", "Mr Taksh")
+JARVIX_GREETING = os.getenv("JARVIX_GREETING", "Welcome back")
+
+# Speech-to-text (faster-whisper, CPU). "tiny.en" is fastest; "base.en" more accurate.
+STT_MODEL = os.getenv("STT_MODEL", "tiny.en")
+STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en")
+
+# Max seconds to record one voice command (recorder also stops early on silence).
+VOICE_RECORD_SECONDS = int(os.getenv("VOICE_RECORD_SECONDS", "5"))
+
+# How Jarvix is woken. "clap" = double-clap detector. Reserved for future modes.
+WAKE_MODE = os.getenv("WAKE_MODE", "clap")
+
+# Welcome routine: only SAFE actions auto-run on wake. Set any to "" to disable.
+AUTO_OPEN_APP_ON_WAKE = os.getenv("AUTO_OPEN_APP_ON_WAKE", "cursor")
+AUTO_OPEN_FOLDER_ON_WAKE = os.getenv("AUTO_OPEN_FOLDER_ON_WAKE", "jarvix")
+AUTO_START_MUSIC_ON_WAKE = os.getenv("AUTO_START_MUSIC_ON_WAKE", "true").lower() in (
+    "1", "true", "yes", "on",
+)

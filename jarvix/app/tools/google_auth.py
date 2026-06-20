@@ -7,6 +7,7 @@ from app.config import GOOGLE_CREDENTIALS_FILE, GOOGLE_TOKEN_FILE
 
 SCOPES = [
     "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
     "https://www.googleapis.com/auth/calendar.events",
     "https://www.googleapis.com/auth/calendar.readonly",
 ]
