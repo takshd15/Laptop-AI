@@ -8,6 +8,7 @@ import json
 from datetime import datetime, timedelta
 
 from app.brain.ollama_client import ask_ollama
+from app.memory.cache import content_hash, get_cached, set_cached
 from app.models import EventCandidate, TIMED_CATEGORIES, normalize_category
 
 MIN_CONFIDENCE = 0.70
@@ -76,11 +77,21 @@ def _parse_candidates(raw: str) -> list[dict]:
     return []
 
 
-def extract_from_email(email: dict, today: str) -> list[EventCandidate]:
+def extract_from_email(email: dict, today: str, use_cache: bool = True) -> list[EventCandidate]:
+    message_id = email.get("id", "")
+    chash = content_hash((email.get("snippet") or "") + (email.get("body") or ""))
+
+    # Cache hit: same message, unchanged content -> skip the model entirely.
+    if use_cache:
+        cached = get_cached(message_id, chash)
+        if cached is not None:
+            return [EventCandidate(**d) for d in cached]
+
     raw = ask_ollama(
         EXTRACTION_SYSTEM,
         _build_user_prompt(email, today),
         json_mode=True,
+        num_predict=512,
     )
 
     candidates: list[EventCandidate] = []
@@ -88,7 +99,7 @@ def extract_from_email(email: dict, today: str) -> list[EventCandidate]:
         if not isinstance(item, dict):
             continue
         # Stamp the source from trusted email data, not the model's guess.
-        item["source_email_id"] = email.get("id", "")
+        item["source_email_id"] = message_id
         item["source_subject"] = email.get("subject", "")
         item["category"] = normalize_category(item.get("category"))
         try:
@@ -96,15 +107,24 @@ def extract_from_email(email: dict, today: str) -> list[EventCandidate]:
         except Exception:
             # Skip malformed items rather than crash the whole scan.
             continue
+
+    if use_cache:
+        set_cached(
+            message_id,
+            email.get("subject", ""),
+            email.get("date", ""),
+            chash,
+            [c.model_dump() for c in candidates],
+        )
     return candidates
 
 
-def extract_candidates(emails: list[dict]) -> list[EventCandidate]:
+def extract_candidates(emails: list[dict], use_cache: bool = True) -> list[EventCandidate]:
     """Run extraction per-email (small prompts keep the 3B model reliable)."""
     today = datetime.now().strftime("%Y-%m-%d")
     out: list[EventCandidate] = []
     for email in emails:
-        out.extend(extract_from_email(email, today))
+        out.extend(extract_from_email(email, today, use_cache=use_cache))
     return out
 
 

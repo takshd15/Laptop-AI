@@ -2,6 +2,11 @@
 __pycache__/
 *.pyc
 
+# Local cache (contains private email extraction data)
+*.sqlite
+*.sqlite3
+jarvix_cache.sqlite
+
 .env
 secrets/
 token*.json

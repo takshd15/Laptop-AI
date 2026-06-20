@@ -1,7 +1,7 @@
 import typer
 from rich.console import Console
 
-from app.brain.ollama_client import ask_ollama
+from app.brain.ollama_client import ask_ollama, warmup as _warmup
 from app.tools.gmail import get_recent_emails
 from app.tools.calendar import (
     get_upcoming_events,
@@ -10,6 +10,7 @@ from app.tools.calendar import (
 )
 from app.tools.extractor import extract_candidates, validate_candidates
 from app.tools.dedupe import find_duplicates
+from app.tools.prefilter import prefilter, is_worthy
 from app.safety.permissions import needs_confirmation
 from app.models import EventCandidate
 
@@ -71,6 +72,14 @@ def _select_candidates(candidates: list[EventCandidate]) -> list[EventCandidate]
 # Commands
 # --------------------------------------------------------------------------- #
 @app.command()
+def warmup():
+    """Pre-load the model into memory so the next 'today'/'scan-mail' is fast."""
+    console.print("[bold cyan]Warming up the model...[/bold cyan]")
+    _warmup()
+    console.print("[green]Model is resident (kept ~25 min). Run 'today' now.[/green]")
+
+
+@app.command()
 def test_brain():
     """Test the local Ollama brain."""
     answer = ask_ollama(
@@ -80,17 +89,21 @@ def test_brain():
     console.print(answer)
 
 
-@app.command()
-def scan_mail(
-    limit: int = typer.Option(12, help="Max emails to scan."),
-    days: int = typer.Option(10, help="How many days back to read (7-14)."),
-):
-    """Scan Gmail, extract event/deadline candidates, and add approved ones to Calendar."""
+def _run_scan(limit: int, days: int, use_prefilter: bool):
+    """Shared scan pipeline: read -> (prefilter) -> extract -> validate -> dedupe -> confirm -> write."""
     console.print(f"[bold cyan]Reading last {days} days of Gmail (up to {limit})...[/bold cyan]")
     emails = get_recent_emails(limit=limit, days=days)
     console.print(f"  {len(emails)} emails fetched.")
 
-    console.print("[bold cyan]Extracting candidates with the local model...[/bold cyan]")
+    if use_prefilter:
+        before = len(emails)
+        emails = prefilter(emails)
+        console.print(
+            f"  Prefilter kept {len(emails)}/{before} likely-relevant email(s); "
+            f"the model only sees those."
+        )
+
+    console.print("[bold cyan]Extracting candidates with the local model (cached when unchanged)...[/bold cyan]")
     raw_candidates = extract_candidates(emails)
     accepted, rejected = validate_candidates(raw_candidates)
 
@@ -134,20 +147,45 @@ def scan_mail(
 
 
 @app.command()
+def scan_mail(
+    limit: int = typer.Option(15, help="Max emails to scan."),
+    days: int = typer.Option(10, help="How many days back to read (7-14)."),
+):
+    """Scan Gmail (prefiltered + cached), extract candidates, and add approved ones to Calendar."""
+    _run_scan(limit=limit, days=days, use_prefilter=True)
+
+
+@app.command()
+def scan_mail_deep(
+    limit: int = typer.Option(12, help="Max emails to scan."),
+    days: int = typer.Option(14, help="How many days back to read."),
+):
+    """Thorough scan: no keyword prefilter, the model sees every fetched email."""
+    _run_scan(limit=limit, days=days, use_prefilter=False)
+
+
+@app.command()
 def today():
-    """Read updated Calendar + recent emails and generate a today/tomorrow plan."""
+    """Read updated Calendar + recent emails and generate a today/tomorrow plan.
+
+    Deadlines come from the calendar (all-day events written by scan-mail), so
+    this command runs a single model call and stays fast - it does NOT re-extract
+    from every email.
+    """
     console.print("[bold cyan]Reading calendar...[/bold cyan]")
-    events = get_upcoming_events(days=2)
+    soon = get_upcoming_events(days=2, limit=20)
+    window = get_events_window(days_ahead=14, limit=50)
 
     console.print("[bold cyan]Reading recent Gmail...[/bold cyan]")
-    emails = get_recent_emails(limit=10, days=10)
+    emails = get_recent_emails(limit=8, days=10)
 
-    console.print("[bold cyan]Extracting upcoming deadlines (read-only)...[/bold cyan]")
-    deadlines, _ = validate_candidates(extract_candidates(emails))
+    # Timed events (today/tomorrow) are "Calendar"; all-day items are "Deadlines".
+    timed = [e for e in soon if "T" in (e.get("start") or "")]
+    deadlines = [e for e in window if "T" not in (e.get("start") or "")]
 
     events_text = "\n".join(
         f"- {e['start']} to {e['end']}: {e['summary']} {('@ ' + e['location']) if e.get('location') else ''}"
-        for e in events
+        for e in timed
     ) or "(none)"
 
     emails_text = "\n".join(
@@ -156,8 +194,7 @@ def today():
     ) or "(none)"
 
     deadlines_text = "\n".join(
-        f"- {d.date}{(' ' + d.start_time) if d.start_time else ''}: {d.title} ({d.category})"
-        for d in deadlines
+        f"- {e['start']}: {e['summary']}" for e in deadlines
     ) or "(none)"
 
     system_prompt = """
@@ -167,12 +204,12 @@ Rules:
 - Do NOT invent dates, meetings, or deadlines. Use only the data provided.
 - Do NOT claim you sent, created, or added anything.
 - If information is missing, say so instead of guessing.
-- Be concise and practical.
+- Maximum 12 bullets total. No long explanations. No motivational essay.
 
-Produce a plan with these clearly separated sections:
+Use exactly these four sections:
 Calendar:
-Important emails:
 Deadlines:
+Important emails:
 Suggested plan:
 """
 
@@ -183,17 +220,59 @@ Confirmed calendar events (today/tomorrow):
 Recent emails:
 {emails_text}
 
-Extracted upcoming deadlines:
+Upcoming all-day deadlines (next 14 days):
 {deadlines_text}
 
-Create a useful, realistic plan for today and tomorrow.
+Create a short, realistic plan for today and tomorrow.
 """
 
     console.print("[bold cyan]Thinking...[/bold cyan]")
-    plan = ask_ollama(system_prompt, user_prompt)
+    plan = ask_ollama(system_prompt, user_prompt, timeout=300, num_predict=300)
 
     console.print("\n[bold green]Jarvix plan:[/bold green]\n")
     console.print(plan)
+
+
+@app.command()
+def today_fast():
+    """Instant deterministic plan (no LLM): calendar + deadlines + top emails."""
+    soon = get_upcoming_events(days=2, limit=20)
+    window = get_events_window(days_ahead=14, limit=50)
+    emails = get_recent_emails(limit=5, days=7)
+
+    timed = [e for e in soon if "T" in (e.get("start") or "")]
+    deadlines = [e for e in window if "T" not in (e.get("start") or "")]
+    important = [e for e in emails if is_worthy(e)] or emails
+
+    console.print("\n[bold green]Today (fast):[/bold green]\n")
+
+    console.print("[bold]Calendar:[/bold]")
+    if timed:
+        for e in timed:
+            when = e["start"][11:16] if "T" in e["start"] else e["start"]
+            console.print(f"- {when} {e['summary']}")
+    else:
+        console.print("- (nothing scheduled today/tomorrow)")
+
+    console.print("\n[bold]Deadlines:[/bold]")
+    if deadlines:
+        for e in deadlines[:5]:
+            console.print(f"- {e['start']} {e['summary']}")
+    else:
+        console.print("- (none in the next 14 days)")
+
+    console.print(f"\n[bold]Important emails:[/bold] ({len(important)})")
+    for e in important[:3]:
+        console.print(f"- {e['subject']}")
+
+    console.print("\n[bold]Suggested:[/bold]")
+    if timed:
+        console.print(f"1. Prepare for: {timed[0]['summary']}.")
+    else:
+        console.print("1. No fixed events - use the time for deep work.")
+    console.print("2. Triage the important emails above.")
+    console.print("3. Re-check the calendar tonight.")
+    console.print("\n[dim]Run 'today' for the full LLM plan.[/dim]")
 
 
 @app.command()
