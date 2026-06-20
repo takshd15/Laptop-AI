@@ -66,7 +66,7 @@ func writeSegment(path string, records []Record) (*SegmentIndex, error) {
 	}
 
 	offset := int64(24) // tracks current byte position for index building
-	idx := newSegmentIndex(len(sorted))
+	idx := newSegmentIndex()
 
 	var recBuf bytes.Buffer
 	for _, rec := range sorted {
@@ -76,7 +76,7 @@ func writeSegment(path string, records []Record) (*SegmentIndex, error) {
 		}
 
 		// Record the offset before writing so the index points to the length prefix.
-		idx.set(rec.ID, offset)
+		idx.addRecord(rec.ID, offset)
 
 		if _, err := bw.Write(recBuf.Bytes()); err != nil {
 			cleanup(); return nil, fmt.Errorf("cannot write record %d: %w", rec.ID, err)
@@ -140,12 +140,12 @@ func loadSegment(path string) ([]Record, *SegmentIndex, error) {
 
 	// Attempt to load the pre-built index
 	idx, idxErr := loadIndex(indexPath(path))
-	needsRebuild := idxErr != nil || idx.size() == 0
+	needsRebuild := idxErr != nil || idx.BlockCount() == 0
 
 	// Read all records, tracking byte offsets to rebuild the index if needed
 	offset := int64(24) // after the 24-byte header
 	records := make([]Record, 0, count)
-	rebuildIdx := newSegmentIndex(int(count))
+	rebuildIdx := newSegmentIndex()
 
 	for i := uint64(0); i < count; i++ {
 		var recLen uint32
@@ -167,7 +167,7 @@ func loadSegment(path string) ([]Record, *SegmentIndex, error) {
 		}
 
 		// offset points to the start of this record (the 4-byte length prefix).
-		rebuildIdx.set(rec.ID, offset)
+		rebuildIdx.addRecord(rec.ID, offset)
 		offset += 4 + int64(recLen)
 
 		records = append(records, rec)

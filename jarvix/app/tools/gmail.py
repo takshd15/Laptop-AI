@@ -20,7 +20,7 @@ def _decode_body(payload: dict) -> str:
     return decoded.decode("utf-8", errors="ignore")
 
 
-def get_recent_emails(limit: int = 10) -> list[dict]:
+def get_recent_emails(limit: int = 10, days: int = 7) -> list[dict]:
     service = gmail_service()
 
     results = (
@@ -29,7 +29,7 @@ def get_recent_emails(limit: int = 10) -> list[dict]:
         .list(
             userId="me",
             maxResults=limit,
-            q="newer_than:7d",
+            q=f"newer_than:{days}d",
         )
         .execute()
     )
