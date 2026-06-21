@@ -12,6 +12,7 @@ import base64
 import json
 from dataclasses import dataclass
 from email.mime.text import MIMEText
+from email.utils import parseaddr
 from pathlib import Path
 
 from app.brain.ollama_client import ask_ollama
@@ -41,10 +42,21 @@ def resolve_recipient(name: str) -> str | None:
     """Look up an email by contact name (case-insensitive). None if unknown."""
     if not name:
         return None
-    return load_contacts().get(name.strip().lower())
+    value = name.strip()
+    if _valid_email(value):
+        return value
+    return load_contacts().get(value.lower())
+
+
+def _valid_email(value: str) -> bool:
+    parsed = parseaddr(value.strip())[1]
+    local, separator, domain = parsed.rpartition("@")
+    return bool(separator and local and "." in domain and " " not in parsed)
 
 
 def save_contact(name: str, email: str) -> None:
+    if not _valid_email(email):
+        raise ValueError("That doesn't look like a valid email address.")
     contacts = load_contacts()
     contacts[name.strip().lower()] = email.strip()
     CONTACTS_FILE.write_text(json.dumps(contacts, indent=2), encoding="utf-8")

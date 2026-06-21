@@ -26,6 +26,9 @@ network calls are to Google APIs (Gmail/Calendar) you authorize.
 - 🌅 Welcome routine (brief + open app/folder + music)
 - 📨 Scan Gmail for events/deadlines → add to Calendar **after confirmation**
 - ✉️ Draft emails, and send them **only after you confirm**
+- 🌦️ Current weather by city and deterministic local time
+- 📅 Calendar queries for tomorrow, weekdays, and specific dates
+- 💬 Multi-turn follow-ups when a recipient, message, folder, or city is missing
 
 ---
 
@@ -107,6 +110,10 @@ python -m app.main warmup
 | `send-email <to> "<msg>"` | Draft, read aloud, **confirm**, then send |
 | `reauth` | Refresh Google OAuth (needed after scope changes) |
 
+Voice examples include “weather in Enschede”, “what time is it”, “calendar for
+next Tuesday”, “open Claude”, and “send an email to Tisha saying I'll be late”.
+Jarvix asks a short follow-up when one of those commands is incomplete.
+
 ---
 
 ## The wake / welcome flow
@@ -139,6 +146,8 @@ song, use `play "<song>"` or say *"play …"*.
 | `AUTO_START_MUSIC_ON_WAKE` | `true`/`false` — tap play/pause on wake |
 | `OLLAMA_MODEL` / `OLLAMA_URL` | Local model + endpoint |
 | `TIMEZONE` | Calendar timezone |
+| `DEFAULT_WEATHER_LOCATION` | City used when no weather location is spoken (blank asks a follow-up) |
+| `WEATHER_TIMEOUT_SECONDS` | Timeout for the Open-Meteo weather request |
 
 ### Aliases & contacts (user-editable)
 
@@ -168,6 +177,15 @@ Jarvix says "sent" only **after** the Gmail API confirms success.
 
 ## Voice tuning
 
+- **Wake-name variations:** common transcriptions such as Jarvix, Jervis,
+  Jorvix, Garvis, and Zarvis are accepted near the start of the utterance.
+  Broad words such as `jar` and `travis` are intentionally rejected so music
+  and ordinary speech do not wake the assistant.
+- **Noisy ignored transcripts:** keep `WAKE_DEBUG=false` (the default). Rejected
+  speech or music is then discarded silently and is never routed as a command.
+- **Muffled wake speech:** `base.en` is the recommended model. Wake-only
+  transcription uses a wider search, Jarvis-oriented hot words, quiet-audio
+  normalization, and the configured `MIC_SILENCE_THRESHOLD` (default `0.0015`).
 - **Clap too sensitive / missed:** edit `threshold` (default `0.25`) in
   `app/voice/clap_detector.py`. Raise it if noise triggers it; lower if claps are
   missed. Widen `max_gap` (default `0.8s`) if your two claps land far apart.

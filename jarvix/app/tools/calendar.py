@@ -1,4 +1,5 @@
-from datetime import datetime, timedelta, timezone, date as date_cls
+from datetime import datetime, timedelta, timezone, date as date_cls, time as time_cls
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 from app.config import TIMEZONE
 from app.models import EventCandidate
 from app.tools.google_auth import calendar_service
@@ -38,6 +39,41 @@ def get_upcoming_events(days: int = 2, limit: int = 20) -> list[dict]:
             }
         )
 
+    return events
+
+
+def get_events_for_date(day: date_cls, limit: int = 20) -> list[dict]:
+    """Fetch events occurring on one local calendar day."""
+    service = calendar_service()
+    try:
+        tz = ZoneInfo(TIMEZONE)
+    except ZoneInfoNotFoundError:
+        tz = datetime.now().astimezone().tzinfo or timezone.utc
+    start = datetime.combine(day, time_cls.min, tzinfo=tz)
+    end = start + timedelta(days=1)
+    result = (
+        service.events()
+        .list(
+            calendarId="primary",
+            timeMin=start.isoformat(),
+            timeMax=end.isoformat(),
+            maxResults=limit,
+            singleEvents=True,
+            orderBy="startTime",
+        )
+        .execute()
+    )
+    events = []
+    for event in result.get("items", []):
+        events.append(
+            {
+                "id": event.get("id"),
+                "summary": event.get("summary", "Untitled"),
+                "start": event["start"].get("dateTime", event["start"].get("date")),
+                "end": event["end"].get("dateTime", event["end"].get("date")),
+                "location": event.get("location", ""),
+            }
+        )
     return events
 
 

@@ -36,6 +36,9 @@ DRAFT_EMAIL = "draft_email"
 SEND_EMAIL = "send_email"
 QUESTION = "question"
 CONVERSATION = "conversation"
+WEATHER = "weather"
+TIME = "time"
+CALENDAR_DATE = "calendar_date"
 CLARIFICATION_NEEDED = "clarification_needed"
 UNKNOWN = "unknown"
 
@@ -65,9 +68,10 @@ class Intent:
 
 
 def _extract_recipient(text: str) -> str | None:
-    """First name token after 'to', e.g. 'email to Alex saying...' -> 'Alex'."""
-    m = re.search(r"\bto\s+([A-Za-z][\w.\-']*)", text, re.I)
-    return m.group(1) if m else None
+    """Recipient phrase after ``to`` and before the message instruction."""
+    stop = r"(?=\s+(?:saying|telling\s+(?:them|him|her)|to\s+say|that|about)\b|[,.!?]|$)"
+    m = re.search(r"\bto\s+([A-Za-z][A-Za-z0-9@+ ._\-']*?)" + stop, text, re.I)
+    return " ".join(m.group(1).split()).strip() if m else None
 
 
 def _extract_message(text: str) -> str:
@@ -97,7 +101,11 @@ def _clean(text: str) -> str:
 
 def _match_alias(text: str, names: list[str]) -> str | None:
     """Return the longest allowlisted alias that appears in the text, if any."""
-    found = [n for n in names if n in text]
+    found = [
+        name
+        for name in names
+        if re.search(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text, re.I)
+    ]
     return max(found, key=len) if found else None
 
 
@@ -119,6 +127,35 @@ def _extract_music_query(text: str) -> str | None:
     if query in {"", "a", "an", "some", "the", "spotify"}:
         return None
     return query or None
+
+
+def _extract_weather_location(text: str) -> str | None:
+    """Best-effort location from phrases such as 'weather in Enschede today'."""
+    m = re.search(r"\b(?:in|for|at)\s+(.+)", text, re.I)
+    if not m:
+        return None
+    location = re.sub(
+        r"\b(?:right\s+now|now|today|tomorrow|this\s+(?:morning|afternoon|evening|week))\b.*$",
+        "",
+        m.group(1),
+        flags=re.I,
+    )
+    return location.strip(" ,.?!") or None
+
+
+def _extract_calendar_date(text: str) -> str | None:
+    t = _clean(text)
+    patterns = (
+        r"\b(next\s+(?:monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
+        r"\b(tomorrow)\b",
+        r"\b(?:on|for)\s+(monday|tuesday|wednesday|thursday|friday|saturday|sunday)\b",
+        r"\b(?:on|for)\s+(\d{4}-\d{2}-\d{2})\b",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, t)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _parse_rules(text: str) -> Intent:
@@ -169,7 +206,9 @@ def _parse_rules(text: str) -> Intent:
         return Intent(MUSIC_NEXT, raw=text)
     if any(k in t for k in ("previous", "last song", "go back", "prev")):
         return Intent(MUSIC_PREVIOUS, raw=text)
-    if "spotify" in t and any(k in t.split() for k in ("open", "start", "play")):
+    if "spotify" in t and "open" in t.split():
+        return Intent(OPEN_APP, "spotify", text)
+    if "spotify" in t and any(k in t.split() for k in ("start", "play")):
         query = _extract_music_query(text)
         return Intent(MUSIC_PLAY_QUERY, query, text)
     if any(k in t for k in ("play music", "play a music", "start music")):
@@ -184,7 +223,7 @@ def _parse_rules(text: str) -> Intent:
     if "open" in t.split() or t.startswith("open"):
         if "folder" in t or "directory" in t:
             fname = _match_alias(t, folders)
-            return Intent(OPEN_FOLDER, fname, text) if fname else Intent(UNKNOWN, raw=text)
+            return Intent(OPEN_FOLDER, fname, text) if fname else Intent(CLARIFICATION_NEEDED, arg="folder", raw=text)
         aname = _match_alias(t, apps)
         if aname:
             return Intent(OPEN_APP, aname, text)
@@ -210,7 +249,22 @@ def _parse_rules(text: str) -> Intent:
             return Intent(READ_EMAILS, raw=text)
         return Intent(SCAN_MAIL, raw=text)
 
-    # 5. Day / schedule / plan.
+    # 5. Live information. These must precede the broad "today" calendar rule.
+    if "weather" in t or "forecast" in t or "temperature" in t:
+        return Intent(WEATHER, arg=_extract_weather_location(text), raw=text)
+    if any(
+        phrase in t
+        for phrase in ("what time", "current time", "time is it", "tell me the time")
+    ):
+        return Intent(TIME, raw=text)
+
+    # 6. Calendar with an explicit relative/absolute day.
+    if any(k in t for k in ("calendar", "calender", "schedule", "events", "plan")):
+        date_phrase = _extract_calendar_date(text)
+        if date_phrase:
+            return Intent(CALENDAR_DATE, arg=date_phrase, raw=text)
+
+    # 7. Day / schedule / plan.
     if any(
         k in t
         for k in (
@@ -227,11 +281,13 @@ def _parse_rules(text: str) -> Intent:
     ):
         return Intent(TODAY, raw=text)
 
-    # 6. Briefing.
+    # 8. Briefing.
     if any(k in t for k in ("brief", "briefing", "welcome", "catch me up", "good morning")):
         return Intent(BRIEF, raw=text)
 
-    # 7. Obvious questions/chit-chat skip the classifier and go straight to a spoken answer.
+    # 9. Obvious questions/chit-chat skip the classifier and go straight to a spoken answer.
+    if re.search(r"\bdifference between\s*$", t):
+        return Intent(CLARIFICATION_NEEDED, arg="comparison", raw=text)
     if t.startswith(
         (
             "what ",
@@ -273,6 +329,9 @@ def _coerce_llm_intent(data: dict, raw: str) -> Intent:
         SEND_EMAIL,
         QUESTION,
         CONVERSATION,
+        WEATHER,
+        TIME,
+        CALENDAR_DATE,
         CLARIFICATION_NEEDED,
         UNKNOWN,
     }
@@ -310,7 +369,7 @@ Use null when a field is not needed.
 Allowed intents:
 - {OPEN_APP}: open a configured app. arg must be one of: {apps}
 - {OPEN_FOLDER}: open a configured folder. arg must be one of: {folders}
-- {MUSIC_PLAY_QUERY}: play/open Spotify or play a requested song. arg is the song/artist/Spotify URL, or null for just Spotify/music.
+- {MUSIC_PLAY_QUERY}: play a requested song. arg is the song/artist/Spotify URL, or null for generic music.
 - {MUSIC_PLAY_PAUSE}: pause, resume, or toggle current playback.
 - {MUSIC_NEXT}: next/change/skip song.
 - {MUSIC_PREVIOUS}: previous/back/last song.
@@ -324,6 +383,9 @@ Allowed intents:
 - {SEND_EMAIL}: send an email. recipient/message when present.
 - {QUESTION}: knowledge, explanation, advice, or reasoning.
 - {CONVERSATION}: casual chat that does not need a tool.
+- {WEATHER}: current weather or forecast. arg is the requested location or null.
+- {TIME}: current local time.
+- {CALENDAR_DATE}: calendar/schedule for a day other than today. arg is the spoken date phrase.
 - {CLARIFICATION_NEEDED}: too vague, incomplete, or likely speech recognition failure.
 - {UNKNOWN}: anything else.
 
@@ -371,6 +433,8 @@ def execute(intent: Intent) -> str | None:
 
     try:
         if intent.name == OPEN_APP:
+            if (intent.arg or "").lower() == "spotify":
+                return music.open_spotify()
             return desktop.open_app(intent.arg or "")
         if intent.name == OPEN_FOLDER:
             return desktop.open_folder(intent.arg or "")

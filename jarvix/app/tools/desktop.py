@@ -74,6 +74,18 @@ def _resolve_app(value: str) -> Path | None:
             if path.exists():
                 return path
 
+    if value.lower() in {"claude", "claude.exe"}:
+        candidates = [
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Claude" / "Claude.exe",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "AnthropicClaude" / "Claude.exe",
+        ]
+        install_root = Path(os.environ.get("LOCALAPPDATA", "")) / "AnthropicClaude"
+        if install_root.is_dir():
+            candidates.extend(sorted(install_root.glob("app-*/Claude.exe"), reverse=True))
+        for path in candidates:
+            if path.exists():
+                return path
+
     found = shutil.which(value)
     return Path(found) if found else None
 

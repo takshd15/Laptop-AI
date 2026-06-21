@@ -30,6 +30,8 @@ SPOTIFY_TOKEN_FILE = ROOT / os.getenv(
 )
 
 TIMEZONE = os.getenv("TIMEZONE", "Europe/Amsterdam")
+DEFAULT_WEATHER_LOCATION = os.getenv("DEFAULT_WEATHER_LOCATION", "")
+WEATHER_TIMEOUT_SECONDS = float(os.getenv("WEATHER_TIMEOUT_SECONDS", "5"))
 
 USER_DISPLAY_NAME = os.getenv("USER_DISPLAY_NAME", "Mr Taksh")
 JARVIX_GREETING = os.getenv("JARVIX_GREETING", "Welcome back")
@@ -57,13 +59,13 @@ ELEVENLABS_SPEAKER_BOOST = os.getenv("ELEVENLABS_SPEAKER_BOOST", "true").lower()
 )
 
 # Speech-to-text (faster-whisper, CPU). "tiny.en" is fastest; "base.en" more accurate.
-STT_MODEL = os.getenv("STT_MODEL", "tiny.en")
+STT_MODEL = os.getenv("STT_MODEL", "base.en")
 STT_LANGUAGE = os.getenv("STT_LANGUAGE", "en")
 
 # Max seconds to record one voice command (recorder also stops early on silence).
 VOICE_RECORD_SECONDS = int(os.getenv("VOICE_RECORD_SECONDS", "5"))
-MIC_SILENCE_THRESHOLD = float(os.getenv("MIC_SILENCE_THRESHOLD", "0.003"))
-WAKE_DEBUG = os.getenv("WAKE_DEBUG", "true").lower() in ("1", "true", "yes", "on")
+MIC_SILENCE_THRESHOLD = float(os.getenv("MIC_SILENCE_THRESHOLD", "0.0015"))
+WAKE_DEBUG = os.getenv("WAKE_DEBUG", "false").lower() in ("1", "true", "yes", "on")
 
 # How Jarvix is woken:
 #   "wakeword" = say "hey jarvis" (default, most reliable)

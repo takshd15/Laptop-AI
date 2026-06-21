@@ -7,8 +7,9 @@ keeps the voice plumbing here and the routing logic in main.
 
 from __future__ import annotations
 
-import re
 from typing import Callable
+
+from app.voice.wakeword import command_after_wake_word
 
 
 _MUSIC_WORDS = (
@@ -33,19 +34,7 @@ def _looks_like_music_command(text: str) -> bool:
 
 
 def _command_from_wake_text(text: str | None) -> str:
-    if not text:
-        return ""
-    match = re.search(
-        r"\b(?:hey\s+)?(?:jarvis|jarvix|jervis|jarviss)\b[,.!?\s]*(.*)",
-        text,
-        re.I,
-    )
-    if not match:
-        return ""
-    command = match.group(1).strip(" ,.?!")
-    if command.lower() in {"", "can you", "can you please", "please"}:
-        return ""
-    return command
+    return command_after_wake_word(text)
 
 
 def wake_loop(
@@ -61,6 +50,7 @@ def wake_loop(
     from app.voice.recorder import record, MicUnavailable
     from app.voice.stt import transcribe
     from app.tools import music as music_tool
+    from app.config import VOICE_RECORD_SECONDS
 
     if wait_for_wake is None:
         from app.voice.clap_detector import wait_for_double_clap
@@ -82,7 +72,7 @@ def wake_loop(
                 paused_music = music_tool.pause_if_playing()
                 print("Listening...")
                 audio = record(
-                    max_seconds=8.0,
+                    max_seconds=float(VOICE_RECORD_SECONDS),
                     trailing_silence=1.1,
                     start_timeout=5.0,
                 )

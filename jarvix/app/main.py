@@ -12,6 +12,7 @@ from app.tools.gmail import get_recent_emails
 from app.tools.calendar import (
     get_upcoming_events,
     get_events_window,
+    get_events_for_date,
     create_event_from_candidate,
 )
 from app.tools.extractor import extract_candidates, validate_candidates
@@ -28,6 +29,7 @@ from app.tools.desktop import (
 )
 from app.tools import music as music_tool
 from app.tools import email_actions
+from app.tools import live_info
 from app.brain import intent_router
 from app.brain.voice_assistant import answer_spoken
 from app.config import (
@@ -113,6 +115,12 @@ def run_intent(intent: intent_router.Intent) -> str:
         return _brief_text()
     if intent.name == intent_router.TODAY:
         return _today_text()
+    if intent.name == intent_router.CALENDAR_DATE:
+        return _calendar_date_text(intent.arg)
+    if intent.name == intent_router.TIME:
+        return live_info.spoken_time()
+    if intent.name == intent_router.WEATHER:
+        return live_info.weather(intent.arg)
     if intent.name == intent_router.READ_EMAILS:
         return _read_emails_text(intent.raw)
     if intent.name == intent_router.SCAN_MAIL:
@@ -141,6 +149,8 @@ def _voice_email(recipient_name: str | None, message: str | None, send: bool) ->
     """
     if not recipient_name:
         return "I'm not sure who to email. Please try again and name the recipient."
+    if not (message or "").strip():
+        return "What should the email say?"
 
     to_email = email_actions.resolve_recipient(recipient_name)
     if not to_email:
@@ -148,7 +158,10 @@ def _voice_email(recipient_name: str | None, message: str | None, send: bool) ->
         to_email = input(f"Email address for {recipient_name} (blank to cancel): ").strip()
         if not to_email:
             return "Okay, cancelled. No email drafted."
-        email_actions.save_contact(recipient_name, to_email)
+        try:
+            email_actions.save_contact(recipient_name, to_email)
+        except ValueError as exc:
+            return str(exc)
         console.print(f"[dim]Saved {recipient_name} -> {to_email} to contacts.[/dim]")
 
     console.print("[bold cyan]Drafting...[/bold cyan]")
@@ -267,6 +280,30 @@ def _calendar_tasks_text(include_startup_actions: bool = False) -> str:
         text += f" I'll open VS Code{music_text} for you."
 
     return text
+
+
+def _calendar_date_text(date_phrase: str | None) -> str:
+    day = live_info.resolve_date_phrase(date_phrase or "")
+    if day is None:
+        return "Which date should I check?"
+
+    console.print(f"[bold cyan]Reading calendar for {day.isoformat()}...[/bold cyan]")
+    events = get_events_for_date(day, limit=12)
+    label = day.strftime("%A, %B %d").replace(" 0", " ")
+    if not events:
+        return f"Your calendar is clear on {label}."
+
+    items = [
+        f"{_spoken_event_time(event)} {event.get('summary', 'Untitled')}"
+        for event in events[:5]
+    ]
+    if len(items) == 1:
+        joined = items[0]
+    elif len(items) == 2:
+        joined = f"{items[0]} and {items[1]}"
+    else:
+        joined = ", ".join(items[:-1]) + f", and {items[-1]}"
+    return f"On {label}, you have {joined}."
 
 
 _NUMBER_WORDS = {
@@ -678,10 +715,15 @@ def wake(
             return wait_for_wake_word(verbose=True)
         trigger_hint = f'Say "hey {WAKE_WORD}" to talk.'
 
-    def handle(text: str) -> str:
-        intent = intent_router.parse(text)
+    from app.brain.dialogue import VoiceDialogue
+    dialogue = VoiceDialogue()
+
+    def execute_voice_intent(intent: intent_router.Intent) -> str:
         console.print(f"[dim]intent={intent.name} arg={intent.arg}[/dim]")
         return run_intent(intent)
+
+    def handle(text: str) -> str:
+        return dialogue.handle(text, execute_voice_intent)
 
     console.print(f"[bold cyan]Jarvix is awake ({wake_mode} mode). {trigger_hint} Ctrl+C to stop.[/bold cyan]")
     try:
