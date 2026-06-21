@@ -15,6 +15,11 @@ from app.voice.recorder import record
 from app.voice.stt import transcribe_wake_word
 
 
+# Only close, name-like mishears are accepted by name. Tokens that collide with
+# ordinary words or other names ("doris", "harvest", "chavez", "joris") were
+# removed: they woke Jarvix on nonsense. Genuine STT slips ("garvis", "zarvis",
+# "charvis", "jarviss") are still caught by the fuzzy edit-distance fallback in
+# ``_is_wake_token``, so they don't need to be listed here.
 _KNOWN_VARIANTS = {
     "jarvis",
     "jarvix",
@@ -22,16 +27,19 @@ _KNOWN_VARIANTS = {
     "jorvis",
     "jorvix",
     "jarves",
-    "jarviss",
-    "garvis",
-    "zarvis",
-    "zaravas",
-    "charvis",
+}
+
+# Real names/words the loose matcher would otherwise wake on. "joris" in
+# particular slips through the fuzzy fallback (edit distance 2 from "jarvis"),
+# so collisions are rejected explicitly regardless of distance.
+_NON_WAKE_WORDS = {
     "joris",
-    "jorwes",
     "doris",
+    "boris",
+    "morris",
     "chavez",
     "harvest",
+    "travis",
 }
 
 
@@ -54,6 +62,8 @@ def _edit_distance(left: str, right: str) -> int:
 
 def _is_wake_token(token: str) -> bool:
     token = token.lower()
+    if token in _NON_WAKE_WORDS:
+        return False
     configured = re.sub(r"[^a-z]", "", WAKE_WORD.lower())
     if token == configured or token in _KNOWN_VARIANTS:
         return True
@@ -88,6 +98,11 @@ def command_after_wake_word(text: str | None) -> str:
         return ""
     command = text[span[1]:].strip(" ,.?!:-")
     if command.lower() in {"", "can you", "can you please", "please"}:
+        return ""
+    # If the "command" is just repeated wake-name garbage ("Jarvis Jorvis",
+    # "Garvis Garvis"), there is no real instruction. Ignore it.
+    tokens = re.findall(r"[A-Za-z]+", command)
+    if tokens and all(_is_wake_token(tok) for tok in tokens):
         return ""
     return command
 

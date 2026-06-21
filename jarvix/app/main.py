@@ -100,6 +100,24 @@ def _select_candidates(candidates: list[EventCandidate]) -> list[EventCandidate]
 # --------------------------------------------------------------------------- #
 # Intent dispatch (used by `route` and the wake loop)
 # --------------------------------------------------------------------------- #
+def _looks_like_clear_question(text: str) -> bool:
+    """True when an unrouted sentence is clearly a real question, not a mishear.
+
+    Used so a clean, understandable sentence the router couldn't classify is
+    answered instead of bouncing back a "I didn't catch that" prompt.
+    """
+    t = (text or "").lower().strip()
+    if len(t.split()) < 3:
+        return False
+    starters = (
+        "best ", "top ", "should ", "can ", "could ", "would ",
+        "is ", "are ", "do ", "does ", "did ",
+        "what ", "why ", "who ", "when ", "where ", "how ",
+        "explain ", "tell me ", "give me ",
+    )
+    return t.startswith(starters) or "?" in t
+
+
 def run_intent(intent: intent_router.Intent) -> str:
     """Execute a parsed intent and return a short response to speak/print.
 
@@ -137,6 +155,10 @@ def run_intent(intent: intent_router.Intent) -> str:
         return answer_spoken(intent.raw)
     if intent.name == intent_router.CLARIFICATION_NEEDED:
         return "I didn't catch that clearly. Can you repeat it?"
+    # An UNKNOWN intent that still reads as a clear question is a routing miss,
+    # not a bad mic. Answer it instead of asking the user to repeat themselves.
+    if intent.name == intent_router.UNKNOWN and _looks_like_clear_question(intent.raw):
+        return answer_spoken(intent.raw)
     return "I didn't catch that clearly. Can you repeat it?"
 
 

@@ -55,6 +55,24 @@ class IntentRouterTests(unittest.TestCase):
         intent = self.parse("Tell me the difference between")
         self.assertEqual((intent.name, intent.arg), (intent_router.CLARIFICATION_NEEDED, "comparison"))
 
+    def test_clear_spoken_questions_route_to_question(self):
+        for text in (
+            "What is the best Indian dessert?",
+            "Top 5 Indian desserts",
+            "Should I stay or should I go?",
+            "Can you explain blockchain to me?",
+        ):
+            self.assertEqual(self.parse(text).name, intent_router.QUESTION, text)
+
+    def test_music_query_mishear_is_corrected(self):
+        intent = self.parse("Play Travis code")
+        self.assertEqual(intent.name, intent_router.MUSIC_PLAY_QUERY)
+        self.assertEqual(intent.arg, "Travis Scott")
+
+    def test_c_drive_opens_a_folder(self):
+        intent = self.parse("Open C drive")
+        self.assertEqual((intent.name, intent.arg), (intent_router.OPEN_FOLDER, "c drive"))
+
 
 class DialogueTests(unittest.TestCase):
     def test_email_message_is_collected_on_next_turn(self):
@@ -77,6 +95,20 @@ class DialogueTests(unittest.TestCase):
         dialogue.handle("Enschede", lambda i: captured.append(i) or "done")
         self.assertEqual(captured[0].arg, "Enschede")
 
+    def test_weather_followup_strips_filler_words(self):
+        dialogue = VoiceDialogue()
+        captured = []
+        dialogue.handle("What's the weather?", lambda i: "unexpected")
+        dialogue.handle("check for Paris", lambda i: captured.append(i) or "done")
+        self.assertEqual(captured[0].arg, "Paris")
+
+    def test_weather_followup_corrects_city_mishear(self):
+        dialogue = VoiceDialogue()
+        captured = []
+        dialogue.handle("What's the weather?", lambda i: "unexpected")
+        dialogue.handle("Ench Cannon", lambda i: captured.append(i) or "done")
+        self.assertEqual(captured[0].arg, "Enschede")
+
 
 class DateResolutionTests(unittest.TestCase):
     def test_next_weekday_is_in_following_week(self):
@@ -86,15 +118,25 @@ class DateResolutionTests(unittest.TestCase):
 
 
 class WakeWordTests(unittest.TestCase):
-    def test_common_transcription_variants_trigger(self):
-        self.assertTrue(_matches("Joris, can you read my calendar?"))
-        self.assertTrue(_matches("Doris"))
-        self.assertTrue(_matches("Garvis, pause the music"))
+    def test_genuine_name_mishears_still_trigger(self):
+        self.assertTrue(_matches("Garvis, pause the music"))  # fuzzy distance 1
         self.assertTrue(_matches("Hey Jorvix, what time is it?"))
-        self.assertTrue(_matches("Harvest, read my calendar"))
+        self.assertTrue(_matches("Jarvix, read my calendar"))
+        self.assertTrue(_matches("Jervis, what's the weather?"))
 
     def test_variant_keeps_same_utterance_command(self):
         self.assertEqual(command_after_wake_word("Garvis, pause the music"), "pause the music")
+
+    def test_repeated_wake_garbage_is_not_a_command(self):
+        # "Jarvis Jorvis" / "Garvis Garvis" carry no real instruction to run.
+        self.assertEqual(command_after_wake_word("Jarvis Jorvis"), "")
+        self.assertEqual(command_after_wake_word("Jarvix Garvis Jarvis"), "")
+
+    def test_name_and_word_collisions_do_not_trigger(self):
+        # These woke Jarvix on nonsense in the June transcript.
+        self.assertFalse(_matches("Doris"))
+        self.assertFalse(_matches("Joris, can you read my calendar?"))
+        self.assertFalse(_matches("Harvest, read my calendar"))
 
     def test_music_and_broad_old_aliases_do_not_trigger(self):
         self.assertFalse(_matches("Enjoy this, pause the music"))

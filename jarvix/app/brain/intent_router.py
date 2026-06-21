@@ -57,6 +57,19 @@ _SIMPLE = {
 # Phrases that separate the recipient from the message ("...saying I'll be late").
 _SAY_MARKERS = ("saying", "telling them", "telling him", "telling her", "to say", "that", "about")
 
+# Common spoken-music mishears -> what the user almost certainly meant. STT
+# routinely mangles artist names ("Travis code" for "Travis Scott"), so a small
+# correction table makes the Spotify search land on the right thing.
+_MUSIC_CORRECTIONS = {
+    "travis code": "Travis Scott",
+    "travis court": "Travis Scott",
+    "travis cott": "Travis Scott",
+    "tailor swift": "Taylor Swift",
+    "taylor swiss": "Taylor Swift",
+    "the weekend": "The Weeknd",
+    "weekend": "The Weeknd",
+}
+
 
 @dataclass
 class Intent:
@@ -126,7 +139,7 @@ def _extract_music_query(text: str) -> str | None:
     query = re.sub(r"\s+", " ", query)
     if query in {"", "a", "an", "some", "the", "spotify"}:
         return None
-    return query or None
+    return _MUSIC_CORRECTIONS.get(query.lower(), query) or None
 
 
 def _extract_weather_location(text: str) -> str | None:
@@ -300,7 +313,19 @@ def _parse_rules(text: str) -> Intent:
             "how ",
             "explain ",
             "tell me ",
+            "give me ",
             "define ",
+            "best ",
+            "top ",
+            "should ",
+            "can ",
+            "could ",
+            "would ",
+            "is ",
+            "are ",
+            "do ",
+            "does ",
+            "did ",
         )
     ):
         return Intent(QUESTION, raw=text)

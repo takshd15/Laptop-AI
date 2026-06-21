@@ -44,13 +44,20 @@ Safety:
 """
 
 
+# When the local model fails we have already heard the user clearly, so we must
+# not blame their speech. These messages name the real problem (the brain), so
+# the user retries instead of repeating themselves into a wall.
+_BRAIN_TIMEOUT_REPLY = "I heard you, but my local brain timed out. Try again in a second."
+_BRAIN_EMPTY_REPLY = "I heard you, but I couldn't come up with an answer for that."
+
+
 def _sanitize_spoken(text: str) -> str:
     text = text.strip()
     text = re.sub(r"```.*?```", "", text, flags=re.S)
     text = re.sub(r"[*_`#>]+", "", text)
     text = re.sub(r"^\s*[-+]\s+", "", text, flags=re.M)
     text = re.sub(r"\s+", " ", text).strip()
-    return text or "I didn't catch that clearly. Can you repeat it?"
+    return text or _BRAIN_EMPTY_REPLY
 
 
 def answer_spoken(transcript: str) -> str:
@@ -59,9 +66,9 @@ def answer_spoken(transcript: str) -> str:
         raw = ask_ollama(
             VOICE_ASSISTANT_SYSTEM,
             f"Current user request:\n{transcript}",
-            timeout=4,
+            timeout=8,
             num_predict=90,
         )
     except Exception:
-        return "I didn't catch that clearly. Can you repeat it?"
+        return _BRAIN_TIMEOUT_REPLY
     return _sanitize_spoken(raw)

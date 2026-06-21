@@ -237,15 +237,45 @@ def _spotify_track_uri(value: str) -> str | None:
     return None
 
 
-def _search_track_uri(query: str) -> str | None:
+def _search_best(query: str) -> dict | None:
+    """Search Spotify for tracks and artists and return the best match.
+
+    Returns a dict with ``display`` (the real name to speak back) and a play
+    target: ``uri`` for a single track, or ``context_uri`` for an artist whose
+    top tracks should play. An artist is preferred only when its name matches
+    the query, so "play Travis Scott" plays the artist while "play Sicko Mode"
+    plays the track.
+    """
     response = _spotify_request(
         "GET",
         "/search",
-        params={"q": query, "type": "track", "limit": 1},
+        params={"q": query, "type": "track,artist", "limit": 5},
     )
     response.raise_for_status()
-    items = response.json().get("tracks", {}).get("items", [])
-    return items[0]["uri"] if items else None
+    data = response.json()
+    tracks = data.get("tracks", {}).get("items", [])
+    artists = data.get("artists", {}).get("items", [])
+
+    wanted = query.strip().lower()
+    for artist in artists:
+        if (artist.get("name") or "").strip().lower() == wanted:
+            return {"display": artist["name"], "uri": None, "context_uri": artist["uri"]}
+
+    if tracks:
+        top = tracks[0]
+        artist_name = (top.get("artists") or [{}])[0].get("name", "")
+        display = f"{top['name']} by {artist_name}" if artist_name else top["name"]
+        return {"display": display, "uri": top["uri"], "context_uri": None}
+
+    if artists:
+        top = artists[0]
+        return {"display": top["name"], "uri": None, "context_uri": top["uri"]}
+
+    return None
+
+
+def _match_play_body(match: dict) -> dict:
+    return {"uris": [match["uri"]]} if match.get("uri") else {"context_uri": match["context_uri"]}
 
 
 def _active_device_id() -> str | None:
@@ -261,7 +291,7 @@ def _active_device_id() -> str | None:
     return None
 
 
-def _play_uri_with_api(uri: str) -> bool:
+def _play_body_with_api(body: dict) -> bool:
     open_spotify()
     time.sleep(1.5)
     device_id = _active_device_id()
@@ -270,7 +300,7 @@ def _play_uri_with_api(uri: str) -> bool:
         "PUT",
         "/me/player/play",
         params=params,
-        json={"uris": [uri]},
+        json=body,
     )
     if response.status_code in (200, 202, 204):
         return True
@@ -278,6 +308,10 @@ def _play_uri_with_api(uri: str) -> bool:
         return False
     response.raise_for_status()
     return True
+
+
+def _play_uri_with_api(uri: str) -> bool:
+    return _play_body_with_api({"uris": [uri]})
 
 
 def _play_uri_fallback(uri: str) -> None:
@@ -392,9 +426,10 @@ def play(query: str) -> str:
         return "Opening the Spotify track"
 
     try:
-        uri = _search_track_uri(query)
-        if uri and _play_uri_with_api(uri):
-            return f"Playing {query} on Spotify"
+        match = _search_best(query)
+        if match and _play_body_with_api(_match_play_body(match)):
+            # Speak the name Spotify actually matched, not the raw mishear.
+            return f"Playing {match['display']} on Spotify"
     except Exception as exc:
         print(f"[spotify api unavailable, falling back] {exc}")
 

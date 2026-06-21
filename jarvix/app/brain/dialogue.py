@@ -15,6 +15,17 @@ class Pending:
     values: dict[str, str] = field(default_factory=dict)
 
 
+# Common spoken-city mishears, mapped to the place actually meant. Voice STT
+# mangles names constantly; a small correction table beats failing the lookup.
+_CITY_CORRECTIONS = {
+    "parris": "Paris",
+    "ensch cannon": "Enschede",
+    "ench cannon": "Enschede",
+    "enchede": "Enschede",
+    "enskede": "Enschede",
+}
+
+
 class VoiceDialogue:
     """Remember exactly one incomplete command between wake interactions."""
 
@@ -29,6 +40,30 @@ class VoiceDialogue:
             if lowered.startswith(prefix):
                 return value[len(prefix):].strip()
         return value
+
+    @staticmethod
+    def _city(text: str) -> str:
+        """Clean a spoken weather follow-up into a bare city name.
+
+        Handles answers like "check for Paris" or "weather in Paris" that carry
+        the question's verbs along with the city, plus common name mishears.
+        """
+        value = VoiceDialogue._value(text)
+        lowered = value.lower()
+        for prefix in (
+            "check for ",
+            "check ",
+            "weather in ",
+            "weather for ",
+            "the weather in ",
+            "for ",
+            "in ",
+        ):
+            if lowered.startswith(prefix):
+                value = value[len(prefix):].strip()
+                lowered = value.lower()
+                break
+        return _CITY_CORRECTIONS.get(lowered, value)
 
     def _continue(self, text: str) -> tuple[intent_router.Intent | None, str | None]:
         assert self.pending is not None
@@ -53,7 +88,7 @@ class VoiceDialogue:
             ), None
         if pending.kind == "weather_location":
             self.pending = None
-            return intent_router.Intent(intent_router.WEATHER, arg=value, raw=text), None
+            return intent_router.Intent(intent_router.WEATHER, arg=self._city(text), raw=text), None
         if pending.kind == "folder":
             aliases = desktop.list_folders()
             lowered = value.lower()
